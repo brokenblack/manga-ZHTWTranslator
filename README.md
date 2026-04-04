@@ -112,20 +112,11 @@ manga_translator/
 │   ├── translator.py       # 主程式（UI + OCR + 翻譯流程）
 │   ├── anki_helper.py      # AnkiConnect 整合、句子卡、挖空卡
 │   ├── anki_settings.py    # Anki 設定視窗
-│   ├── history_manager.py  # 翻譯歷史管理
-│   └── install_ocr.bat     # OCR 套件一鍵安裝
+│   └── history_manager.py  # 翻譯歷史管理
+├── modelfile for local LLM/
+│   └── Modelfile           # Ollama 本地模型設定
 └── pyproject.toml
 ```
-
----
-
-## 打包為 EXE
-
-```bash
-python translator/build_exe.py
-```
-
-輸出在 `dist/遊戲翻譯工具.exe`。
 
 ---
 
