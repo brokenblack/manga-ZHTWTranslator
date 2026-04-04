@@ -7,7 +7,17 @@
 """
 
 import sys
+import os
 from pathlib import Path
+
+# ── GPU 自動偵測 ──────────────────────────────────────────────
+# NVIDIA 用戶能用 CUDA；AMD 用戶沒 CUDA 支援，改用 CPU
+try:
+    import torch
+    if not torch.cuda.is_available():
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+except ImportError:
+    pass
 
 # ── PyInstaller 打包路徑修正 ─────────────────────────────────
 # 打包後 __file__ 在臨時解壓目錄；config / history 要存在 exe 同層
@@ -87,7 +97,14 @@ _manga_ocr = None; _easy_ocr = {}
 def get_manga_ocr():
     global _manga_ocr
     if _manga_ocr is None:
-        from manga_ocr import MangaOcr; _manga_ocr = MangaOcr()
+        try:
+            from manga_ocr import MangaOcr
+            _manga_ocr = MangaOcr()
+        except Exception as e:
+            print(f"❌ manga_ocr 初始化失敗：{type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     return _manga_ocr
 
 def get_easy_ocr(langs):
@@ -1113,7 +1130,7 @@ class MainApp(tk.Tk):
             self.ocr_ready=True
             self.after(0,lambda: self.status.set(f"✅ 就緒｜{eng}｜F9 截圖翻譯"))
         except Exception as e:
-            self.after(0,lambda: self.status.set(f"❌ OCR 載入失敗：{e}"))
+            self.after(0,lambda e=e: self.status.set(f"❌ OCR 載入失敗：{e}"))
 
     def _diag_ocr(self):
         """彈出 OCR 套件診斷視窗"""
