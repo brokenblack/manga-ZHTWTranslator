@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# 環境變數（API 金鑰）
+.env
+.env.*
+config.json
+
+# OCR 模型快取（體積過大）
+.manga_ocr/
+manga_ocr_model/
+*.onnx
+*.pdmodel
+*.pdiparams
+
+# 翻譯歷史（本地資料）
+history.json
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 不推送的腳本
+build_exe.py
+install_ocr.bat
+dist/
+build/
+*.exe
+*.spec

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manga-translator"
+version = "1.0.0"
+description = "漫畫日文翻譯工具 - 支援 OCR 辨識、翻譯、Anki 整合"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "brokenblack" }
+]
+
+dependencies = [
+    "pillow>=9.0.0",           # 圖片處理
+    "requests>=2.25.0",         # HTTP 請求
+    "python-dotenv>=0.19.0",    # 環境變數載入
+]
+
+optional-dependencies = {
+    # OCR 相依 (PaddleOCR)
+    "ocr" = [
+        "paddleocr>=2.7.0.3",
+        "paddlepaddle>=2.5.0",
+    ],
+    # 開發相依
+    "dev" = [
+        "pytest>=7.0",
+        "black>=22.0",
+        "pylint>=2.13",
+    ]
+}
+
+[project.urls]
+Homepage = "https://github.com/brokenblack/manga-translator"
+Repository = "https://github.com/brokenblack/manga-translator.git"
+
+[tool.setuptools]
+packages = ["translator"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39", "py310"]
+
+[tool.pylint.messages_control]
+disable = [
+    "C0111",  # missing-docstring
+    "W0212",  # protected-access
+]
