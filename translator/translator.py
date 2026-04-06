@@ -31,14 +31,16 @@ else:
     APP_DIR = Path(__file__).parent
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import threading
 import json
 import time
 import re
 import urllib.request
-from PIL import ImageGrab, Image
+from PIL import ImageGrab, Image, ImageDraw, ImageFont
 import numpy as np
+import pystray
+import keyboard as kb
 
 from anki_helper   import (
     extract_reading, get_forvo_tag,
@@ -69,9 +71,14 @@ DEFAULT_CONFIG = {
     "anki_cloze_deck": "遊戲翻譯（挖空）", "anki_cloze_model": "Cloze",
     "anki_cloze_fields": {
         "text": "Text", "extra": "Extra", "audio": "Audio", "sentence": "",
+        "pitch_accent": "VocabPitchPattern",
     },
     "forvo_api_key": "", "audio_enabled": True,
     "font_size": 14,
+    "global_hotkey": "ctrl+alt+q",
+    "background_mode": True,
+    "close_ask": True,
+    "anki_trigger_pitch": True,
 }
 
 def load_config():
@@ -159,6 +166,14 @@ def run_ocr(img, cfg):
     return "\n".join(merged)
 
 
+# ── 簡轉繁（OpenCC）─────────────────────────────────────────
+try:
+    from opencc import OpenCC
+    _s2t = OpenCC('s2t')
+except ImportError:
+    _s2t = None
+
+
 # ── 翻譯 ─────────────────────────────────────────────────────
 def _prompt(cfg):
     src = {"ja":"日文","ko":"韓文","ja+ko":"日文或韓文"}.get(cfg.get("ocr_language","ja"),"日文")
@@ -183,7 +198,9 @@ def _prompt(cfg):
 （例如：這裡用〜てしまう 表示遺憾語氣；或：〜のだ 是強調原因的說明語氣）
 
 規則：
+- 所有中文必須使用繁體中文，嚴禁簡體字（例：✓資訊 ✗信息 ✓遊戲 ✗游戏 ✓軟體 ✗软件）
 - 【例句】請直接使用輸入文字，除非輸入過長（超過 30 字）才截短或改寫
+- 若輸入是短詞或單字（5 字以內），【例句】必須造一個包含該詞的完整自然例句（至少 8 字），不可只重覆單字本身
 - 重點單字以學習者角度挑選，避免列明顯簡單的詞（如 私、です）
 - 若整句皆為平假名或非常簡單，重點單字可省略
 - 人名、地名若無通用譯法請保留原文
@@ -191,13 +208,13 @@ def _prompt(cfg):
 
 def _word_prompt(cfg):
     src = {"ja":"日文","ko":"韓文","ja+ko":"日文"}.get(cfg.get("ocr_language","ja"),"日文")
-    return f"""你是{src}老師。收到單字後，請用繁體中文簡潔說明：
+    return f"""你是{src}老師。收到單字後，請用繁體中文簡潔說明（嚴禁使用簡體字）：
 
 【讀音】（平假名）
 【詞性】（名詞／動詞／形容詞等）
 【意思】（核心意思，1–2 行）
 【例句】
-{src}：（自然例句）
+{src}：（包含該單字的完整自然例句，至少 8 字）
 中文：（翻譯）
 【補充】（選填：語感、常見搭配、近義詞差異）
 
@@ -219,24 +236,31 @@ def _extract_brief_meaning(explain: str, fallback: str = "") -> str:
     return fallback
 
 
+def _ensure_traditional(text: str) -> str:
+    """簡轉繁後處理（OpenCC s2t）。已是繁體的文字不受影響。"""
+    if _s2t:
+        return _s2t.convert(text)
+    return text
+
+
 def translate(text, cfg, system_prompt=None):
     p = cfg["api_provider"]; pr = system_prompt if system_prompt is not None else _prompt(cfg)
     max_tok = 800   # 老師模式輸出較長
     if p == "claude":
         import anthropic
-        return anthropic.Anthropic(api_key=cfg["claude_api_key"]).messages.create(
+        result = anthropic.Anthropic(api_key=cfg["claude_api_key"]).messages.create(
             model="claude-opus-4-5", max_tokens=max_tok, system=pr,
             messages=[{"role":"user","content":text}]).content[0].text.strip()
-    if p == "gemini":
+    elif p == "gemini":
         import google.generativeai as genai; genai.configure(api_key=cfg["gemini_api_key"])
-        return genai.GenerativeModel("gemini-2.0-flash",system_instruction=pr).generate_content(text).text.strip()
-    if p == "groq":
+        result = genai.GenerativeModel("gemini-2.0-flash",system_instruction=pr).generate_content(text).text.strip()
+    elif p == "groq":
         from groq import Groq
-        return Groq(api_key=cfg["groq_api_key"]).chat.completions.create(
+        result = Groq(api_key=cfg["groq_api_key"]).chat.completions.create(
             model=cfg["groq_model"],
             messages=[{"role":"system","content":pr},{"role":"user","content":text}],
             max_tokens=max_tok).choices[0].message.content.strip()
-    if p == "ollama":
+    elif p == "ollama":
         url = cfg.get("ollama_url","http://localhost:11434").rstrip("/")
         payload = json.dumps({"model":cfg.get("ollama_model","gemma3:12b"),
             "messages":[{"role":"system","content":pr},{"role":"user","content":text}],
@@ -244,8 +268,10 @@ def translate(text, cfg, system_prompt=None):
         req = urllib.request.Request(f"{url}/api/chat", data=payload,
             headers={"Content-Type":"application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read())["message"]["content"].strip()
-    raise ValueError(f"未知 API：{p}")
+            result = json.loads(r.read())["message"]["content"].strip()
+    else:
+        raise ValueError(f"未知 API：{p}")
+    return _ensure_traditional(result)
 
 def extract_clean_translation(teacher_response: str) -> str:
     """從老師回應抽出【譯文】區塊。格式不符時回傳整個原始回應。"""
@@ -267,10 +293,18 @@ def extract_example_sentence(teacher_response: str) -> tuple:
         return "", ""
     text = block.group(1).strip()
     # 嘗試配對「日文：」「中文：」（也接受語言名稱變體）
-    ja_m  = re.search(r'(?:日文|原文|[Jj][Aa])：\s*(.+)', text)
+    ja_m  = re.search(r'(?:日文|原文|韓文|[Jj][Aa]|[Kk][Oo])：\s*(.+)', text)
     zh_m  = re.search(r'(?:中文|繁中|翻譯|[Zz][Hh])：\s*(.+)', text)
     ja  = ja_m.group(1).strip()  if ja_m  else ""
     zh  = zh_m.group(1).strip()  if zh_m  else ""
+    # Fallback：如果 regex 不匹配，取 block 中第一行含日/韓文字元的文字
+    if not ja:
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith(("中文", "翻譯", "（")):
+                if JP_PAT.search(line) or KO_PAT.search(line):
+                    ja = line
+                    break
     return ja, zh
 
 
@@ -698,6 +732,15 @@ class SentenceDialog(tk.Toplevel):
         ttk.Label(sel_row, textvariable=self.word_var,
                   font=("Yu Gothic UI",12,"bold"), foreground="#1a6fb5").pack(side="left", padx=6)
 
+        reading_row = ttk.Frame(f); reading_row.pack(fill="x", pady=(2,0))
+        ttk.Label(reading_row, text="讀音：").pack(side="left")
+        self.reading_var = tk.StringVar(value="")
+        self.reading_entry = ttk.Entry(reading_row, textvariable=self.reading_var,
+                                        width=30, font=("Yu Gothic UI", 11))
+        self.reading_entry.pack(side="left", padx=4)
+        ttk.Label(reading_row, text="（可手動修改，會存入 Anki）",
+                  foreground="gray").pack(side="left")
+
         ttk.Separator(f).pack(fill="x", pady=4)
 
         # 單字查詢
@@ -730,6 +773,9 @@ class SentenceDialog(tk.Toplevel):
 
     def _load_tokens(self):
         self._tokens = tokenize_sentence(self.sentence)
+        lang = self.cfg.get("ocr_language", "ja")
+        sent_reading = extract_reading(self.sentence) if lang == "ja" else ""
+        self.after(0, lambda: self.reading_var.set(sent_reading))
         self.after(0, self._render_tokens)
 
     def _render_tokens(self):
@@ -826,7 +872,7 @@ class SentenceDialog(tk.Toplevel):
                     except Exception as e:
                         self.after(0, lambda: self.status.set(f"⚠️ Forvo：{e}，繼續加入"))
 
-                sent_reading = extract_reading(self.sentence) if lang == "ja" else ""
+                sent_reading = self.reading_var.get().strip()
                 ok, msg = add_sentence_note(
                     orig=self.orig, example=self.sentence,
                     trans=extract_clean_translation(self.translation),
@@ -935,6 +981,19 @@ class GeneralSettingsWindow(tk.Toplevel):
         self._R(f,"字體大小",1)
         self.fs=tk.IntVar(value=self.cfg.get("font_size",14))
         ttk.Spinbox(f,from_=10,to=28,textvariable=self.fs,width=6).grid(row=1,column=1,sticky="w",**P)
+        ttk.Separator(f).grid(row=2,column=0,columnspan=3,sticky="ew",pady=8)
+        self._R(f,"全域熱鍵",3)
+        self.hk=tk.StringVar(value=self.cfg.get("global_hotkey","ctrl+alt+q"))
+        ttk.Entry(f,textvariable=self.hk,width=22).grid(row=3,column=1,sticky="w",**P)
+        ttk.Label(f,text="例：ctrl+alt+q、ctrl+shift+space",foreground="gray").grid(
+            row=4,column=0,columnspan=3,sticky="w",padx=8)
+        ttk.Separator(f).grid(row=5,column=0,columnspan=3,sticky="ew",pady=8)
+        self.ask=tk.BooleanVar(value=self.cfg.get("close_ask",True))
+        ttk.Checkbutton(f,text="關閉視窗時詢問（隱藏到背景 / 完全退出）",
+                        variable=self.ask).grid(row=6,column=0,columnspan=3,sticky="w",padx=8,pady=2)
+        self.bg=tk.BooleanVar(value=self.cfg.get("background_mode",True))
+        ttk.Checkbutton(f,text="不詢問時，關閉 X 預設隱藏到背景",
+                        variable=self.bg).grid(row=7,column=0,columnspan=3,sticky="w",padx=8,pady=2)
 
     def _save(self):
         self.cfg.update({
@@ -944,9 +1003,30 @@ class GeneralSettingsWindow(tk.Toplevel):
             "textractor_filter_english":self.txf.get(),
             "textractor_min_length":self.txm.get(),
             "auto_interval":self.intv.get(),"font_size":self.fs.get(),
+            "global_hotkey":self.hk.get().strip().lower(),
+            "close_ask":self.ask.get(),
+            "background_mode":self.bg.get(),
         })
         for k,v in self.kvars.items(): self.cfg[k]=v.get().strip()
         self.on_save(self.cfg); self.destroy()
+
+
+# ── 系統匣圖示產生 ───────────────────────────────────────────
+def _make_tray_image(size=64):
+    """動態產生 tray 圖示：藍底 + 白色 T 字"""
+    img = Image.new("RGB", (size, size), (40, 110, 200))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([4, 4, size-5, size-5], radius=8,
+                           outline=(255, 255, 255), width=3)
+    try:
+        font = ImageFont.truetype("arial.ttf", int(size*0.55))
+    except Exception:
+        font = ImageFont.load_default()
+    bbox = draw.textbbox((0, 0), "T", font=font)
+    tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+    draw.text(((size-tw)/2 - bbox[0], (size-th)/2 - bbox[1] - 2),
+              "T", fill=(255, 255, 255), font=font)
+    return img
 
 
 # ── 主視窗 ───────────────────────────────────────────────────
@@ -962,8 +1042,15 @@ class MainApp(tk.Tk):
         self.title("🎮 遊戲即時翻譯"); self.geometry("900x580")
         self.resizable(True,True); self.attributes("-topmost",True)
 
+        self._current_hotkey = None
+        self._tray_icon = None
+        self._quitting = False
+
         self._build_ui()
         self.bind("<F9>", lambda e: self.select_region())
+        self._register_global_hotkey()
+        self._start_tray()
+        self.protocol("WM_DELETE_WINDOW", self._on_close_window)
         threading.Thread(target=self._preload_ocr, daemon=True).start()
         self._refresh_history()
 
@@ -983,7 +1070,9 @@ class MainApp(tk.Tk):
         ocr_f=ttk.Frame(self.nb); tx_f=ttk.Frame(self.nb)
         self.nb.add(ocr_f, text="📸 OCR 截圖"); self.nb.add(tx_f, text="🔗 Textractor")
 
-        ttk.Button(ocr_f,text="✂️ 選取區域並翻譯 (F9)",command=self.select_region).pack(side="left",**P)
+        _hk = self.cfg.get("global_hotkey","ctrl+alt+q").upper()
+        self._region_btn = ttk.Button(ocr_f,text=f"✂️ 選取區域並翻譯 ({_hk})",command=self.select_region)
+        self._region_btn.pack(side="left",**P)
         ttk.Button(ocr_f,text="清除",command=self.clear_region).pack(side="right",**P)
         ttk.Button(ocr_f,text="🔍 OCR 診斷",command=self._diag_ocr).pack(side="right",**P)
 
@@ -1128,7 +1217,8 @@ class MainApp(tk.Tk):
             eng=self.cfg.get("ocr_engine","manga-ocr")
             (get_manga_ocr if eng=="manga-ocr" else lambda: get_easy_ocr(_lang_tuple(self.cfg)))()
             self.ocr_ready=True
-            self.after(0,lambda: self.status.set(f"✅ 就緒｜{eng}｜F9 截圖翻譯"))
+            _hk = self.cfg.get("global_hotkey","ctrl+alt+q").upper()
+            self.after(0,lambda: self.status.set(f"✅ 就緒｜{eng}｜{_hk} 截圖翻譯"))
         except Exception as e:
             self.after(0,lambda e=e: self.status.set(f"❌ OCR 載入失敗：{e}"))
 
@@ -1227,7 +1317,7 @@ class MainApp(tk.Tk):
     def _preview_screenshot(self):
         r = self.cfg.get("capture_region")
         if not r:
-            self.status.set("⚠️ 尚未設定截圖區域，請先按 F9 選取")
+            self.status.set(f"⚠️ 尚未設定截圖區域，請先按 {self.cfg.get('global_hotkey','ctrl+alt+q').upper()} 選取")
             return
         # 先隱藏視窗再截圖，350ms 後執行
         self.withdraw()
@@ -1411,6 +1501,16 @@ class MainApp(tk.Tk):
         ex_ja, _ = extract_example_sentence(trans)
         # 優先用 AI 例句；若 AI 例句與原文相同或為空則 fallback 用原文
         sentence = ex_ja if (ex_ja and ex_ja.strip() != orig.strip()) else orig
+        # 單字 fallback：若例句跟原文相同且原文很短，
+        # 嘗試從完整 AI 回覆中找一個含原文的較長日文句子
+        if sentence == orig and len(orig) <= 5:
+            for line in trans.splitlines():
+                line = line.strip()
+                if orig in line and len(line) > len(orig) + 3 and (JP_PAT.search(line) or KO_PAT.search(line)):
+                    cleaned = re.sub(r'^(?:日文|原文|韓文|[Jj][Aa]|[Kk][Oo])：\s*', '', line)
+                    if len(cleaned) > len(orig) + 2:
+                        sentence = cleaned
+                        break
         ClozeDialog(self, sentence, orig, trans, self.cfg,
                     on_done=lambda msg: self.anki_status.set(msg))
 
@@ -1510,6 +1610,8 @@ class MainApp(tk.Tk):
             self.cfg.update(new_cfg)
             save_config(self.cfg)
             self._lang_chg()
+            self._register_global_hotkey()
+            self._refresh_hotkey_labels()
         GeneralSettingsWindow(self, self.cfg, _on_save)
 
     def open_anki_settings(self):
@@ -1517,6 +1619,89 @@ class MainApp(tk.Tk):
             self.cfg.update(new_cfg)
             save_config(self.cfg)
         AnkiSettingsWindow(self, self.cfg, _on_save)
+
+    # ── 全域熱鍵 ─────────────────────────────────────────────
+    def _register_global_hotkey(self):
+        """註冊/重新註冊全域熱鍵。熱鍵 callback 在 keyboard thread，需 marshal 回 Tk"""
+        if self._current_hotkey is not None:
+            try: kb.remove_hotkey(self._current_hotkey)
+            except Exception: pass
+            self._current_hotkey = None
+        hk = self.cfg.get("global_hotkey", "ctrl+alt+q").strip().lower()
+        if not hk:
+            return
+        try:
+            self._current_hotkey = kb.add_hotkey(
+                hk, lambda: self.after(0, self.select_region))
+        except Exception as e:
+            self.after(0, lambda: self.status.set(f"⚠️ 熱鍵註冊失敗 {hk}: {e}"))
+
+    def _refresh_hotkey_labels(self):
+        """熱鍵變更後同步更新 UI 文字"""
+        hk = self.cfg.get("global_hotkey", "ctrl+alt+q").upper()
+        if hasattr(self, "_region_btn"):
+            self._region_btn.configure(text=f"✂️ 選取區域並翻譯 ({hk})")
+        if self.ocr_ready:
+            eng = self.cfg.get("ocr_engine", "manga-ocr")
+            self.status.set(f"✅ 就緒｜{eng}｜{hk} 截圖翻譯")
+
+    # ── 系統匣 ───────────────────────────────────────────────
+    def _start_tray(self):
+        img = _make_tray_image()
+        menu = pystray.Menu(
+            pystray.MenuItem("顯示視窗", self._tray_show, default=True),
+            pystray.MenuItem("隱藏視窗", self._tray_hide),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("截圖翻譯", lambda: self.after(0, self.select_region)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出", self._tray_quit),
+        )
+        self._tray_icon = pystray.Icon("game_translator", img, "遊戲即時翻譯", menu)
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()
+
+    def _tray_show(self, *_):
+        def _do():
+            self.deiconify(); self.lift()
+            self.attributes("-topmost", True)
+        self.after(0, _do)
+
+    def _tray_hide(self, *_):
+        self.after(0, self.withdraw)
+
+    def _tray_quit(self, *_):
+        self._quitting = True
+        if self._tray_icon is not None:
+            try: self._tray_icon.stop()
+            except Exception: pass
+        if self._current_hotkey is not None:
+            try: kb.remove_hotkey(self._current_hotkey)
+            except Exception: pass
+        self.after(0, self.destroy)
+
+    # ── 關閉按鈕 ─────────────────────────────────────────────
+    def _on_close_window(self):
+        """右上 X 被按下：詢問或直接隱藏"""
+        if self._quitting:
+            return
+        if self.cfg.get("close_ask", True):
+            ans = messagebox.askyesnocancel(
+                "關閉視窗",
+                "要把程式隱藏到系統匣持續運作嗎？\n\n"
+                "【是】隱藏到背景（推薦）\n"
+                "【否】完全退出\n"
+                "【取消】不關閉",
+                parent=self)
+            if ans is None:
+                return
+            if ans:
+                self.withdraw()
+            else:
+                self._tray_quit()
+        else:
+            if self.cfg.get("background_mode", True):
+                self.withdraw()
+            else:
+                self._tray_quit()
 
 
 if __name__ == "__main__":

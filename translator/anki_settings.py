@@ -22,10 +22,11 @@ SENTENCE_ROLES = [
 ]
 
 CLOZE_ROLES = [
-    ("text",    "挖空文字（Text）",   "{{c1::單字::讀音}} 格式，例：今日は{{c1::天気::てんき}}がいい"),
-    ("extra",   "提示（Extra）",      "繁體中文翻譯（卡片背面提示）"),
-    ("audio",   "音訊",              "[sound:xxx.mp3]（單字 Forvo 音檔）"),
-    ("sentence","原句（選用）",       "完整日文例句（可放在 Extra 或獨立欄位）"),
+    ("text",         "挖空文字（Text）",   "{{c1::單字::讀音}} 格式，例：今日は{{c1::天気::てんき}}がいい"),
+    ("extra",        "提示（Extra）",      "繁體中文翻譯（卡片背面提示）"),
+    ("audio",        "音訊",              "[sound:xxx.mp3]（單字 Forvo 音檔）"),
+    ("sentence",     "原句（選用）",       "完整日文例句（可放在 Extra 或獨立欄位）"),
+    ("pitch_accent", "Pitch Accent",      "AJT addon 自動填入，留空即可"),
 ]
 
 
@@ -174,6 +175,20 @@ class AnkiSettingsWindow(tk.Toplevel):
             row=len(SENTENCE_ROLES)+5, column=0, columnspan=3,
             sticky="w", padx=8, pady=6)
 
+        ttk.Separator(f).grid(row=len(SENTENCE_ROLES)+6, column=0,
+                              columnspan=3, sticky="ew", pady=4)
+        self.trigger_pitch_var = tk.BooleanVar(
+            value=self.cfg.get("anki_trigger_pitch", True))
+        ttk.Checkbutton(
+            f, text="建立卡片後自動觸發 AJT Pitch Accent（會短暫開啟編輯視窗）",
+            variable=self.trigger_pitch_var).grid(
+            row=len(SENTENCE_ROLES)+7, column=0, columnspan=3,
+            sticky="w", padx=8, pady=4)
+        ttk.Label(f, text="AJT 只在編輯器載入時才填 pitch，需藉由開啟編輯視窗觸發",
+                  foreground="gray50", wraplength=480).grid(
+            row=len(SENTENCE_ROLES)+8, column=0, columnspan=3,
+            sticky="w", padx=26, pady=(0, 4))
+
     def _load_sent_fields(self, _=None):
         model = self.sent_model_var.get()
         url   = self.url_var.get()
@@ -228,6 +243,7 @@ class AnkiSettingsWindow(tk.Toplevel):
         _cloze_defaults = {
             "text": "Text", "extra": "Extra",
             "audio": "Audio", "sentence": "",
+            "pitch_accent": "VocabPitchPattern",
         }
         for i, (role, label, desc) in enumerate(CLOZE_ROLES, start=6):
             ttk.Label(f, text=label).grid(row=i, column=0, sticky="w", padx=8, pady=3)
@@ -343,6 +359,8 @@ class AnkiSettingsWindow(tk.Toplevel):
             "anki_cloze_fields": _fm(self.cloze_field_vars),
             # Forvo
             "forvo_api_key":     self.forvo_key.get().strip(),
+            # AJT Pitch 觸發
+            "anki_trigger_pitch": self.trigger_pitch_var.get(),
         })
         self.on_save(self.cfg)
         self.destroy()

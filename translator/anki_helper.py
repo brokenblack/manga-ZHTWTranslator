@@ -155,6 +155,7 @@ def add_sentence_note(orig: str, example: str, trans: str, reading: str,
             "translation": trans,
             "audio":       audio_tag,
         },
+        trigger_pitch = cfg.get("anki_trigger_pitch", True),
     )
 
 
@@ -213,12 +214,14 @@ def add_cloze_note(sentence: str, translation: str,
             "audio":       audio_tag,
             "sentence":    sentence,          # 原句（Extra 也可放）
         },
+        trigger_pitch = cfg.get("anki_trigger_pitch", True),
     )
 
 
 # ── 共用新增邏輯 ─────────────────────────────────────────────
 def _add_note(deck: str, model: str, fm: dict,
-              tags: list, url: str, data: dict) -> tuple:
+              tags: list, url: str, data: dict,
+              trigger_pitch: bool = False) -> tuple:
     anki_ensure_deck(deck, url)
 
     fields: dict = {}
@@ -227,9 +230,9 @@ def _add_note(deck: str, model: str, fm: dict,
         if fname and value:
             fields[fname] = value
 
-    # pitch_accent 留空讓 AJT 填
+    # pitch_accent 留空讓 AJT 填（但不覆蓋已被其他 role 佔用的欄位）
     pa = fm.get("pitch_accent", "").strip()
-    if pa:
+    if pa and pa not in fields:
         fields[pa] = ""
 
     note = {
@@ -242,4 +245,22 @@ def _add_note(deck: str, model: str, fm: dict,
     resp = anki_req("addNote", {"note": note}, url)
     if resp.get("error"):
         return False, f"Anki 錯誤：{resp['error']}"
-    return True, f"✅ 已加入「{deck}」（ID: {resp['result']}）"
+
+    note_id = resp["result"]
+    pitch_msg = ""
+    # 觸發 AJT Pitch Accent addon（guiEditNote 會觸發 editor_did_load_note hook）
+    if trigger_pitch:
+        try:
+            print(f"[AJT] guiEditNote note={note_id}")
+            pr = anki_req("guiEditNote", {"note": note_id}, url)
+            if pr.get("error"):
+                pitch_msg = f"｜AJT 觸發失敗：{pr['error']}"
+                print(f"[AJT] error: {pr['error']}")
+            else:
+                pitch_msg = "｜已觸發 AJT（請關閉編輯視窗）"
+                print(f"[AJT] success")
+        except Exception as e:
+            pitch_msg = f"｜AJT 觸發失敗：{e}"
+            print(f"[AJT] exception: {e}")
+
+    return True, f"✅ 已加入「{deck}」（ID: {note_id}）{pitch_msg}"
