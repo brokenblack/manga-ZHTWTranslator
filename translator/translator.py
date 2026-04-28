@@ -62,8 +62,11 @@ CONFIG_PATH  = APP_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "api_provider": "groq",
+    "api_priority": ["groq"],
     "claude_api_key": "", "gemini_api_key": "",
     "groq_api_key": "", "groq_model": "llama-3.3-70b-versatile",
+    "openrouter_api_key": "",
+    "openrouter_model": "meta-llama/llama-3.3-70b-instruct:free",
     "ollama_url": "http://localhost:11434", "ollama_model": "gemma3:12b",
     "ocr_engine": "manga-ocr", "ocr_language": "ja", "text_direction": "ltr",
     "capture_region": None, "auto_mode": False, "auto_interval": 3.0,
@@ -88,6 +91,7 @@ DEFAULT_CONFIG = {
     "close_ask": True,
     "anki_open_editor": True,
     "autostart": False,
+    "translation_prompt": "",
 }
 
 def load_config():
@@ -204,9 +208,8 @@ except ImportError:
 
 
 # ── 翻譯 ─────────────────────────────────────────────────────
-def _prompt(cfg):
-    src = {"ja":"日文","ko":"韓文","ja+ko":"日文或韓文"}.get(cfg.get("ocr_language","ja"),"日文")
-    return f"""你是一位親切、專業的{src}老師，正在幫助學生理解遊戲中的{src}文字。
+# 預設翻譯 prompt 模板。{src} 會被替換為「日文」/「韓文」/「日文或韓文」。
+DEFAULT_TRANSLATION_PROMPT_TEMPLATE = """你是一位親切、專業的{src}老師，正在幫助學生理解遊戲中的{src}文字。
 
 收到{src}輸入後，請用繁體中文依以下格式回應：
 
@@ -234,6 +237,11 @@ def _prompt(cfg):
 - 若整句皆為平假名或非常簡單，重點單字可省略
 - 人名、地名若無通用譯法請保留原文
 - 格式要精簡，不要過度展開"""
+
+def _prompt(cfg):
+    src = {"ja":"日文","ko":"韓文","ja+ko":"日文或韓文"}.get(cfg.get("ocr_language","ja"),"日文")
+    template = cfg.get("translation_prompt", "").strip() or DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+    return template.replace("{src}", src)
 
 def _word_prompt(cfg):
     src = {"ja":"日文","ko":"韓文","ja+ko":"日文"}.get(cfg.get("ocr_language","ja"),"日文")
@@ -272,20 +280,19 @@ def _ensure_traditional(text: str) -> str:
     return text
 
 
-def translate(text, cfg, system_prompt=None):
-    p = cfg["api_provider"]; pr = system_prompt if system_prompt is not None else _prompt(cfg)
-    max_tok = 800   # 老師模式輸出較長
+def _translate_one(p, text, pr, cfg, max_tok=800):
+    """單一 provider 呼叫；失敗會 raise。"""
     if p == "claude":
         import anthropic
-        result = anthropic.Anthropic(api_key=cfg["claude_api_key"]).messages.create(
+        return anthropic.Anthropic(api_key=cfg["claude_api_key"]).messages.create(
             model="claude-opus-4-5", max_tokens=max_tok, system=pr,
             messages=[{"role":"user","content":text}]).content[0].text.strip()
     elif p == "gemini":
         import google.generativeai as genai; genai.configure(api_key=cfg["gemini_api_key"])
-        result = genai.GenerativeModel("gemini-2.0-flash",system_instruction=pr).generate_content(text).text.strip()
+        return genai.GenerativeModel("gemini-2.0-flash",system_instruction=pr).generate_content(text).text.strip()
     elif p == "groq":
         from groq import Groq
-        result = Groq(api_key=cfg["groq_api_key"]).chat.completions.create(
+        return Groq(api_key=cfg["groq_api_key"]).chat.completions.create(
             model=cfg["groq_model"],
             messages=[{"role":"system","content":pr},{"role":"user","content":text}],
             max_tokens=max_tok).choices[0].message.content.strip()
@@ -297,10 +304,41 @@ def translate(text, cfg, system_prompt=None):
         req = urllib.request.Request(f"{url}/api/chat", data=payload,
             headers={"Content-Type":"application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
-            result = json.loads(r.read())["message"]["content"].strip()
-    else:
-        raise ValueError(f"未知 API：{p}")
-    return _ensure_traditional(result)
+            return json.loads(r.read())["message"]["content"].strip()
+    elif p == "openrouter":
+        # OpenAI-compatible endpoint；用 stdlib urllib 不需新依賴
+        payload = json.dumps({
+            "model": cfg.get("openrouter_model","meta-llama/llama-3.3-70b-instruct:free"),
+            "messages":[{"role":"system","content":pr},{"role":"user","content":text}],
+            "max_tokens": max_tok,
+        }).encode()
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type":"application/json",
+                "Authorization": f"Bearer {cfg.get('openrouter_api_key','')}",
+                "HTTP-Referer": "https://github.com/local/game-translator",
+                "X-Title": "Game Translator",
+            })
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())["choices"][0]["message"]["content"].strip()
+    raise ValueError(f"未知 API：{p}")
+
+
+def translate(text, cfg, system_prompt=None):
+    """依優先順序嘗試各 provider，回傳 (result, used_provider)。全失敗則 raise。"""
+    pr = system_prompt if system_prompt is not None else _prompt(cfg)
+    priority = cfg.get("api_priority") or [cfg.get("api_provider", "groq")]
+    last_err = None
+    for p in priority:
+        try:
+            result = _translate_one(p, text, pr, cfg)
+            return _ensure_traditional(result), p
+        except Exception as e:
+            last_err = f"{p}: {e}"
+            continue
+    raise RuntimeError(f"所有翻譯模型皆失敗｜{last_err}")
 
 def extract_clean_translation(teacher_response: str) -> str:
     """從老師回應抽出【譯文】區塊。格式不符時回傳整個原始回應。"""
@@ -343,7 +381,10 @@ class RegionSelector(tk.Toplevel):
         super().__init__(parent)
         self.callback = callback; self.sx = self.sy = 0; self.rect = None
         self.attributes("-fullscreen",True); self.attributes("-alpha",0.35)
+        self.attributes("-topmost", True)
         self.configure(bg="black", cursor="crosshair"); self.overrideredirect(True)
+        # 搶到最上層 + 鍵盤焦點（遊戲常自稱 topmost，需主動 lift）
+        self.after(10, self._force_top)
         c = tk.Canvas(self, bg="black", highlightthickness=0); c.pack(fill="both", expand=True)
         c.bind("<ButtonPress-1>",  self._p)
         c.bind("<B1-Motion>",       self._d)
@@ -352,6 +393,12 @@ class RegionSelector(tk.Toplevel):
         tk.Label(c, text="拖曳選取翻譯區域  |  ESC 取消",
                  fg="white", bg="black", font=("Microsoft JhengHei",16)
                  ).place(relx=0.5, rely=0.05, anchor="center")
+    def _force_top(self):
+        try:
+            self.lift()
+            self.focus_force()
+            self.grab_set()
+        except Exception: pass
     def _p(self, e):
         # x_root/y_root = absolute screen coords; cx/cy = canvas-relative for drawing
         self.sx, self.sy = e.x_root, e.y_root
@@ -578,7 +625,7 @@ class ClozeDialog(tk.Toplevel):
         self.lookup_btn.configure(state="disabled")
         def _w():
             try:
-                result = translate(word, self.cfg, system_prompt=_word_prompt(self.cfg))
+                result, _ = translate(word, self.cfg, system_prompt=_word_prompt(self.cfg))
                 self.after(0, lambda: self._set_explain(result))
             except Exception as e:
                 self.after(0, lambda: self._set_explain(f"❌ {e}"))
@@ -843,7 +890,7 @@ class SentenceDialog(tk.Toplevel):
         self.lookup_btn.configure(state="disabled")
         def _w():
             try:
-                result = translate(word, self.cfg, system_prompt=_word_prompt(self.cfg))
+                result, _ = translate(word, self.cfg, system_prompt=_word_prompt(self.cfg))
                 self.after(0, lambda: self._set_explain(result))
             except Exception as e:
                 self.after(0, lambda: self._set_explain(f"❌ {e}"))
@@ -928,7 +975,7 @@ class GeneralSettingsWindow(tk.Toplevel):
         self.title("翻譯設定"); self.resizable(False,False)
         self.attributes("-topmost", True); self.grab_set()
         nb = ttk.Notebook(self); nb.pack(fill="both",expand=True,padx=8,pady=8)
-        self._api(nb); self._tx(nb); self._gen(nb)
+        self._api(nb); self._tx(nb); self._prompt_tab(nb); self._gen(nb)
         btn=ttk.Frame(self); btn.pack(pady=6)
         ttk.Button(btn,text="儲存",command=self._save).pack(side="left",padx=4)
         ttk.Button(btn,text="取消",command=self.destroy).pack(side="left",padx=4)
@@ -972,26 +1019,88 @@ class GeneralSettingsWindow(tk.Toplevel):
     def _api(self,nb):
         f=ttk.Frame(nb,padding=12); nb.add(f,text="翻譯 API")
         P={"padx":8,"pady":4}
-        self._R(f,"翻譯 API",0)
-        self.prov=tk.StringVar(value=self.cfg["api_provider"])
-        ttk.Combobox(f,textvariable=self.prov,values=["groq","gemini","claude","ollama"],
-                     state="readonly",width=12).grid(row=0,column=1,sticky="w",**P)
+        self._R(f,"翻譯使用模型",0)
+        ttk.Label(f,text="（由上至下＝優先順序，前者失敗自動 fallback）",
+                  foreground="gray").grid(row=0,column=2,sticky="w",padx=4)
+
+        list_f=ttk.Frame(f); list_f.grid(row=1,column=0,columnspan=3,sticky="w",padx=8,pady=4)
+        self.prov_lb=tk.Listbox(list_f,height=4,width=14,exportselection=False)
+        self.prov_lb.pack(side="left")
+        priority=self.cfg.get("api_priority") or [self.cfg.get("api_provider","groq")]
+        for p in priority:
+            self.prov_lb.insert("end", p)
+
+        btn_f=ttk.Frame(list_f); btn_f.pack(side="left",padx=6)
+        ttk.Button(btn_f,text="↑",width=3,command=self._prov_up).pack()
+        ttk.Button(btn_f,text="↓",width=3,command=self._prov_down).pack(pady=2)
+        ttk.Button(btn_f,text="⊖",width=3,command=self._prov_remove).pack()
+
+        add_f=ttk.Frame(list_f); add_f.pack(side="left",padx=6)
+        self.prov_add=tk.StringVar(value="claude")
+        ttk.Combobox(add_f,textvariable=self.prov_add,
+                     values=["groq","gemini","claude","openrouter","ollama"],
+                     state="readonly",width=12).pack()
+        ttk.Button(add_f,text="⊕ 加入",command=self._prov_add).pack(pady=2)
+
         self.kvars={}
-        for i,(k,lbl) in enumerate([("groq_api_key","Groq"),("gemini_api_key","Gemini"),("claude_api_key","Claude")],1):
+        for i,(k,lbl) in enumerate([
+            ("groq_api_key","Groq"),
+            ("gemini_api_key","Gemini"),
+            ("claude_api_key","Claude"),
+            ("openrouter_api_key","OpenRouter"),
+        ],2):
             self._R(f,f"{lbl} API Key",i)
             v=tk.StringVar(value=self.cfg.get(k,""))
             ttk.Entry(f,textvariable=v,width=44,show="*").grid(row=i,column=1,columnspan=2,sticky="ew",**P)
             self.kvars[k]=v
-        self._R(f,"Groq 模型",4)
+        self._R(f,"Groq 模型",6)
         self.gm=tk.StringVar(value=self.cfg.get("groq_model","llama-3.3-70b-versatile"))
         ttk.Combobox(f,textvariable=self.gm,width=30,
                      values=["llama-3.3-70b-versatile","llama-3.1-8b-instant","gemma2-9b-it"]
-                     ).grid(row=4,column=1,sticky="w",**P)
-        ttk.Separator(f).grid(row=5,column=0,columnspan=3,sticky="ew",pady=8)
-        self._R(f,"Ollama URL",6); self.ou=tk.StringVar(value=self.cfg.get("ollama_url","http://localhost:11434"))
-        self._E(f,self.ou,6)
-        self._R(f,"Ollama 模型",7); self.om=tk.StringVar(value=self.cfg.get("ollama_model","gemma3:12b"))
-        self._E(f,self.om,7,w=24)
+                     ).grid(row=6,column=1,sticky="w",**P)
+        self._R(f,"OpenRouter 模型",7)
+        self.orm=tk.StringVar(value=self.cfg.get("openrouter_model","meta-llama/llama-3.3-70b-instruct:free"))
+        ttk.Combobox(f,textvariable=self.orm,width=44,
+                     values=[
+                         "meta-llama/llama-3.3-70b-instruct:free",
+                         "google/gemini-2.0-flash-exp:free",
+                         "deepseek/deepseek-chat-v3-0324:free",
+                         "qwen/qwen-2.5-72b-instruct:free",
+                         "anthropic/claude-3.5-sonnet",
+                         "openai/gpt-4o-mini",
+                     ]).grid(row=7,column=1,columnspan=2,sticky="ew",**P)
+        ttk.Label(f,text="可自由輸入任何 OpenRouter model slug；:free 後綴為免費額度",
+                  foreground="gray").grid(row=8,column=0,columnspan=3,sticky="w",padx=8)
+        ttk.Separator(f).grid(row=9,column=0,columnspan=3,sticky="ew",pady=8)
+        self._R(f,"Ollama URL",10); self.ou=tk.StringVar(value=self.cfg.get("ollama_url","http://localhost:11434"))
+        self._E(f,self.ou,10)
+        self._R(f,"Ollama 模型",11); self.om=tk.StringVar(value=self.cfg.get("ollama_model","gemma3:12b"))
+        self._E(f,self.om,11,w=24)
+
+    def _prov_up(self):
+        sel=self.prov_lb.curselection()
+        if not sel or sel[0]==0: return
+        i=sel[0]; v=self.prov_lb.get(i)
+        self.prov_lb.delete(i); self.prov_lb.insert(i-1,v)
+        self.prov_lb.selection_set(i-1)
+
+    def _prov_down(self):
+        sel=self.prov_lb.curselection()
+        if not sel or sel[0]==self.prov_lb.size()-1: return
+        i=sel[0]; v=self.prov_lb.get(i)
+        self.prov_lb.delete(i); self.prov_lb.insert(i+1,v)
+        self.prov_lb.selection_set(i+1)
+
+    def _prov_remove(self):
+        sel=self.prov_lb.curselection()
+        if not sel or self.prov_lb.size()<=1: return
+        self.prov_lb.delete(sel[0])
+
+    def _prov_add(self):
+        p=self.prov_add.get()
+        existing=list(self.prov_lb.get(0,"end"))
+        if p in existing: return
+        self.prov_lb.insert("end",p)
 
     def _tx(self,nb):
         f=ttk.Frame(nb,padding=12); nb.add(f,text="Textractor")
@@ -1004,6 +1113,27 @@ class GeneralSettingsWindow(tk.Toplevel):
         self.txm=tk.IntVar(value=self.cfg.get("textractor_min_length",3))
         ttk.Spinbox(f,from_=1,to=20,textvariable=self.txm,width=6).grid(row=2,column=1,sticky="w",**P)
 
+    def _prompt_tab(self,nb):
+        f=ttk.Frame(nb,padding=12); nb.add(f,text="AI Prompt")
+        ttk.Label(f,text="自訂翻譯 prompt（留空則使用預設）。{src} 會自動替換為「日文」/「韓文」",
+                  foreground="gray",wraplength=520).pack(anchor="w",pady=(0,6))
+        txt_f=ttk.Frame(f); txt_f.pack(fill="both",expand=True)
+        sb=ttk.Scrollbar(txt_f,orient="vertical")
+        self.prompt_txt=tk.Text(txt_f,wrap="word",height=18,width=64,
+                                yscrollcommand=sb.set,font=("Consolas",10))
+        sb.configure(command=self.prompt_txt.yview)
+        self.prompt_txt.pack(side="left",fill="both",expand=True)
+        sb.pack(side="right",fill="y")
+        # 載入既有設定，若空則填入預設供使用者編輯
+        existing=self.cfg.get("translation_prompt","").strip()
+        self.prompt_txt.insert("1.0", existing or DEFAULT_TRANSLATION_PROMPT_TEMPLATE)
+        btn=ttk.Frame(f); btn.pack(fill="x",pady=(6,0))
+        def _restore():
+            self.prompt_txt.delete("1.0","end")
+            self.prompt_txt.insert("1.0", DEFAULT_TRANSLATION_PROMPT_TEMPLATE)
+        ttk.Button(btn,text="↺ 還原預設",command=_restore).pack(side="left")
+        ttk.Label(btn,text="儲存空白＝改回預設",foreground="gray").pack(side="left",padx=10)
+
     def _gen(self,nb):
         f=ttk.Frame(nb,padding=12); nb.add(f,text="一般")
         P={"padx":8,"pady":4}
@@ -1014,37 +1144,54 @@ class GeneralSettingsWindow(tk.Toplevel):
         self.fs=tk.IntVar(value=self.cfg.get("font_size",14))
         ttk.Spinbox(f,from_=10,to=28,textvariable=self.fs,width=6).grid(row=1,column=1,sticky="w",**P)
         ttk.Separator(f).grid(row=2,column=0,columnspan=3,sticky="ew",pady=8)
-        self._R(f,"全域熱鍵",3)
+        self._R(f,"截圖快捷鍵",3)
         self.hk=tk.StringVar(value=self.cfg.get("global_hotkey","ctrl+alt+q"))
         ttk.Entry(f,textvariable=self.hk,width=22).grid(row=3,column=1,sticky="w",**P)
         ttk.Label(f,text="例：ctrl+alt+q、ctrl+shift+space",foreground="gray").grid(
             row=4,column=0,columnspan=3,sticky="w",padx=8)
-        ttk.Separator(f).grid(row=5,column=0,columnspan=3,sticky="ew",pady=8)
+        self._R(f,"監聽快捷鍵",5)
+        self.chk=tk.StringVar(value=self.cfg.get("clip_hotkey","ctrl+alt+t"))
+        ttk.Entry(f,textvariable=self.chk,width=22).grid(row=5,column=1,sticky="w",**P)
+        ttk.Label(f,text="切換 Textractor 剪貼簿監聽（監聽中按 ESC 也可取消）",foreground="gray").grid(
+            row=6,column=0,columnspan=3,sticky="w",padx=8)
+        ttk.Separator(f).grid(row=7,column=0,columnspan=3,sticky="ew",pady=8)
         self.ask=tk.BooleanVar(value=self.cfg.get("close_ask",True))
         ttk.Checkbutton(f,text="關閉視窗時詢問（隱藏到背景 / 完全退出）",
-                        variable=self.ask).grid(row=6,column=0,columnspan=3,sticky="w",padx=8,pady=2)
+                        variable=self.ask).grid(row=8,column=0,columnspan=3,sticky="w",padx=8,pady=2)
         self.bg=tk.BooleanVar(value=self.cfg.get("background_mode",True))
         ttk.Checkbutton(f,text="不詢問時，關閉 X 預設隱藏到背景",
-                        variable=self.bg).grid(row=7,column=0,columnspan=3,sticky="w",padx=8,pady=2)
-        ttk.Separator(f).grid(row=8,column=0,columnspan=3,sticky="ew",pady=8)
+                        variable=self.bg).grid(row=9,column=0,columnspan=3,sticky="w",padx=8,pady=2)
+        ttk.Separator(f).grid(row=10,column=0,columnspan=3,sticky="ew",pady=8)
         self.autostart=tk.BooleanVar(value=self.cfg.get("autostart",False))
         ttk.Checkbutton(f,text="開機後自動啟動（背景運作，縮到系統匣）",
-                        variable=self.autostart).grid(row=9,column=0,columnspan=3,sticky="w",padx=8,pady=2)
+                        variable=self.autostart).grid(row=11,column=0,columnspan=3,sticky="w",padx=8,pady=2)
         ttk.Label(f,text="啟用後寫入 HKCU\\...\\Run 登錄檔，不需管理員權限",
-                  foreground="gray").grid(row=10,column=0,columnspan=3,sticky="w",padx=8)
+                  foreground="gray").grid(row=12,column=0,columnspan=3,sticky="w",padx=8)
 
     def _save(self):
+        prompt_val = self.prompt_txt.get("1.0","end-1c").strip()
+        # 若內容等同預設，存空字串以利未來預設更新時自動套用
+        if prompt_val == DEFAULT_TRANSLATION_PROMPT_TEMPLATE.strip():
+            prompt_val = ""
+        priority = list(self.prov_lb.get(0,"end"))
+        if not priority:
+            priority = ["groq"]
         self.cfg.update({
-            "api_provider":self.prov.get(),
-            "groq_model":self.gm.get(),"ollama_url":self.ou.get().strip(),
+            "api_priority": priority,
+            "api_provider": priority[0],
+            "groq_model":self.gm.get(),
+            "openrouter_model":self.orm.get().strip(),
+            "ollama_url":self.ou.get().strip(),
             "ollama_model":self.om.get().strip(),
             "textractor_filter_english":self.txf.get(),
             "textractor_min_length":self.txm.get(),
             "auto_interval":self.intv.get(),"font_size":self.fs.get(),
             "global_hotkey":self.hk.get().strip().lower(),
+            "clip_hotkey":self.chk.get().strip().lower(),
             "close_ask":self.ask.get(),
             "background_mode":self.bg.get(),
             "autostart":self.autostart.get(),
+            "translation_prompt":prompt_val,
         })
         for k,v in self.kvars.items(): self.cfg[k]=v.get().strip()
         ok, msg = apply_autostart(self.autostart.get())
@@ -1119,12 +1266,15 @@ class MainApp(tk.Tk):
 
         self._current_hotkey = None
         self._current_clip_hotkey = None
+        self._esc_hotkey = None
         self._tray_icon = None
         self._quitting = False
 
         self._build_ui()
         self.bind("<F9>", lambda e: self.select_region())
-        self._register_global_hotkey()
+        # 延後註冊：等 mainloop 開始、keyboard hook thread 啟動後，
+        # 首次按鍵才不會落在 hook 尚未就緒的空窗
+        self.after(300, self._register_global_hotkey)
         self._start_tray()
         self.protocol("WM_DELETE_WINDOW", self._on_close_window)
         threading.Thread(target=self._preload_ocr, daemon=True).start()
@@ -1175,9 +1325,12 @@ class MainApp(tk.Tk):
         # Textractor tab
         self.tx_st=tk.StringVar(value="⏸ 未啟動")
         ttk.Label(tx_f,textvariable=self.tx_st,foreground="gray30").pack(side="left",**P)
-        self.tx_btn=tk.StringVar(value="▶ 開始監聽")
+        self.tx_btn=tk.StringVar()
+        self._set_tx_btn_text(active=False)
         ttk.Button(tx_f,textvariable=self.tx_btn,command=self.toggle_tx).pack(side="left",**P)
-        ttk.Label(tx_f,text="← Extensions > Copy to Clipboard",foreground="#999").pack(side="left")
+        self._tx_hint=tk.StringVar()
+        self._set_tx_hint_text(active=False)
+        ttk.Label(tx_f,textvariable=self._tx_hint,foreground="#999").pack(side="left")
 
         # 設定按鈕
         top=ttk.Frame(left); top.pack(fill="x",padx=8,pady=(2,0))
@@ -1499,17 +1652,42 @@ class MainApp(tk.Tk):
         finally: self._working=False
 
     # ── Textractor ───────────────────────────────────────────
+    def _set_tx_btn_text(self, active: bool):
+        hk = self.cfg.get("clip_hotkey", "ctrl+alt+t").upper()
+        self.tx_btn.set(f"⏹ 停止監聽 ({hk})" if active else f"▶ 開始監聽 ({hk})")
+
+    def _set_tx_hint_text(self, active: bool):
+        if active:
+            self._tx_hint.set("← 監聽中｜ESC 取消")
+        else:
+            self._tx_hint.set("← Extensions > Copy to Clipboard")
+
     def toggle_tx(self): (self._stop_tx if self._clip_polling else self._start_tx)()
     def _start_tx(self):
         self._clip_polling=True; self._last_clip=self._clip()
-        self.tx_st.set("🟢 監聽中..."); self.tx_btn.set("⏹ 停止監聽")
-        self.status.set("🔗 Textractor 模式｜等待剪貼簿..."); self._poll()
+        self.tx_st.set("🟢 監聽中...")
+        self._set_tx_btn_text(active=True)
+        self._set_tx_hint_text(active=True)
+        # 註冊全域 ESC 熱鍵：監聽進行中才生效，停止時解除
+        try:
+            self._esc_hotkey = kb.add_hotkey(
+                "esc", lambda: self.after(0, self._stop_tx))
+        except Exception:
+            self._esc_hotkey = None
+        self.status.set("🔗 Textractor 模式｜等待剪貼簿...（ESC 或 Ctrl+Alt+T 停止）")
+        self._poll()
     def _stop_tx(self):
         self._clip_polling=False
         if self._tx_debounce_id:
             self.after_cancel(self._tx_debounce_id); self._tx_debounce_id=None
         self._tx_pending=""
-        self.tx_st.set("⏸ 已停止"); self.tx_btn.set("▶ 開始監聽")
+        if getattr(self, "_esc_hotkey", None) is not None:
+            try: kb.remove_hotkey(self._esc_hotkey)
+            except Exception: pass
+            self._esc_hotkey = None
+        self.tx_st.set("⏸ 已停止")
+        self._set_tx_btn_text(active=False)
+        self._set_tx_hint_text(active=False)
         self.status.set("✅ Textractor 模式已停止")
     def _poll(self):
         if not self._clip_polling: return
@@ -1550,14 +1728,15 @@ class MainApp(tk.Tk):
     def _do_translate(self,src:str):
         self._set(self.orig_text,src); self._set(self.trans_text,"翻譯中...")
         self.after(0,lambda: self.anki_status.set(""))
-        p=self.cfg.get("api_provider","groq").upper()
-        self.after(0,lambda: self.status.set(f"🌐 {p} 翻譯中..."))
+        chain = "→".join(p.upper() for p in (self.cfg.get("api_priority") or [self.cfg.get("api_provider","groq")]))
+        self.after(0,lambda: self.status.set(f"🌐 {chain} 翻譯中..."))
         try:
-            result=translate(src,self.cfg)
+            result, used_p = translate(src,self.cfg)
             self._last_orig=src; self._last_trans=result
             self._set(self.trans_text,result)
             ts=time.strftime("%H:%M:%S")
-            self.after(0,lambda: self.status.set(f"✅ {ts}｜{p}"))
+            up = used_p.upper()
+            self.after(0,lambda: self.status.set(f"✅ {ts}｜{up}"))
             if self._clip_polling:
                 self.after(0,lambda: self.tx_st.set(f"🟢 監聽中｜{ts}"))
             # 存入歷史
@@ -1710,6 +1889,9 @@ class MainApp(tk.Tk):
         hk = self.cfg.get("global_hotkey", "ctrl+alt+q").upper()
         if hasattr(self, "_region_btn"):
             self._region_btn.configure(text=f"✂️ 選取區域並翻譯 ({hk})")
+        # 監聽按鈕文字也含熱鍵，需同步刷新
+        if hasattr(self, "tx_btn"):
+            self._set_tx_btn_text(active=self._clip_polling)
         if self.ocr_ready:
             eng = self.cfg.get("ocr_engine", "manga-ocr")
             self.status.set(f"✅ 就緒｜{eng}｜{hk} 截圖翻譯")
@@ -1747,6 +1929,9 @@ class MainApp(tk.Tk):
             except Exception: pass
         if self._current_clip_hotkey is not None:
             try: kb.remove_hotkey(self._current_clip_hotkey)
+            except Exception: pass
+        if self._esc_hotkey is not None:
+            try: kb.remove_hotkey(self._esc_hotkey)
             except Exception: pass
         self.after(0, self.destroy)
 
