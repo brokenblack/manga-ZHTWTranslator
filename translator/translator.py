@@ -83,9 +83,11 @@ DEFAULT_CONFIG = {
     "forvo_api_key": "", "audio_enabled": True,
     "font_size": 14,
     "global_hotkey": "ctrl+alt+q",
+    "clip_hotkey": "ctrl+alt+t",
     "background_mode": True,
     "close_ask": True,
     "anki_open_editor": True,
+    "autostart": False,
 }
 
 def load_config():
@@ -1024,6 +1026,12 @@ class GeneralSettingsWindow(tk.Toplevel):
         self.bg=tk.BooleanVar(value=self.cfg.get("background_mode",True))
         ttk.Checkbutton(f,text="不詢問時，關閉 X 預設隱藏到背景",
                         variable=self.bg).grid(row=7,column=0,columnspan=3,sticky="w",padx=8,pady=2)
+        ttk.Separator(f).grid(row=8,column=0,columnspan=3,sticky="ew",pady=8)
+        self.autostart=tk.BooleanVar(value=self.cfg.get("autostart",False))
+        ttk.Checkbutton(f,text="開機後自動啟動（背景運作，縮到系統匣）",
+                        variable=self.autostart).grid(row=9,column=0,columnspan=3,sticky="w",padx=8,pady=2)
+        ttk.Label(f,text="啟用後寫入 HKCU\\...\\Run 登錄檔，不需管理員權限",
+                  foreground="gray").grid(row=10,column=0,columnspan=3,sticky="w",padx=8)
 
     def _save(self):
         self.cfg.update({
@@ -1036,9 +1044,46 @@ class GeneralSettingsWindow(tk.Toplevel):
             "global_hotkey":self.hk.get().strip().lower(),
             "close_ask":self.ask.get(),
             "background_mode":self.bg.get(),
+            "autostart":self.autostart.get(),
         })
         for k,v in self.kvars.items(): self.cfg[k]=v.get().strip()
+        ok, msg = apply_autostart(self.autostart.get())
+        if not ok:
+            messagebox.showwarning("開機自動啟動", msg, parent=self)
         self.on_save(self.cfg); self.destroy()
+
+
+# ── Windows 開機自動啟動 ────────────────────────────────────
+AUTOSTART_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "GameTranslator"
+
+def _autostart_target_cmd() -> str:
+    if getattr(sys, "frozen", False):
+        exe = str(Path(sys.executable).resolve())
+        return f'"{exe}" --minimized'
+    pyw = str(Path(sys.executable).with_name("pythonw.exe"))
+    script = str(Path(__file__).resolve())
+    return f'"{pyw}" "{script}" --minimized'
+
+def apply_autostart(enabled: bool) -> tuple:
+    try:
+        import winreg
+    except ImportError:
+        return False, "此功能僅支援 Windows"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY,
+                            0, winreg.KEY_ALL_ACCESS) as k:
+            if enabled:
+                winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ,
+                                  _autostart_target_cmd())
+                return True, "已啟用開機自動啟動"
+            try:
+                winreg.DeleteValue(k, AUTOSTART_NAME)
+            except FileNotFoundError:
+                pass
+            return True, "已關閉開機自動啟動"
+    except OSError as e:
+        return False, f"寫入登錄檔失敗：{e}"
 
 
 # ── 系統匣圖示產生 ───────────────────────────────────────────
@@ -1073,6 +1118,7 @@ class MainApp(tk.Tk):
         self.resizable(True,True); self.attributes("-topmost",True)
 
         self._current_hotkey = None
+        self._current_clip_hotkey = None
         self._tray_icon = None
         self._quitting = False
 
@@ -1315,7 +1361,12 @@ class MainApp(tk.Tk):
         def _on_cancel():
             self.deiconify()
         sel = RegionSelector(self, _on_select)
-        sel.protocol("WM_DELETE_WINDOW", _on_cancel)
+        def _cancel_and_restore(*_):
+            try: sel.destroy()
+            except Exception: pass
+            _on_cancel()
+        sel.protocol("WM_DELETE_WINDOW", _cancel_and_restore)
+        sel.bind("<Escape>", _cancel_and_restore)
 
     def clear_region(self):
         self.cfg["capture_region"] = None
@@ -1635,14 +1686,24 @@ class MainApp(tk.Tk):
             try: kb.remove_hotkey(self._current_hotkey)
             except Exception: pass
             self._current_hotkey = None
+        if self._current_clip_hotkey is not None:
+            try: kb.remove_hotkey(self._current_clip_hotkey)
+            except Exception: pass
+            self._current_clip_hotkey = None
         hk = self.cfg.get("global_hotkey", "ctrl+alt+q").strip().lower()
-        if not hk:
-            return
-        try:
-            self._current_hotkey = kb.add_hotkey(
-                hk, lambda: self.after(0, self.select_region))
-        except Exception as e:
-            self.after(0, lambda: self.status.set(f"⚠️ 熱鍵註冊失敗 {hk}: {e}"))
+        if hk:
+            try:
+                self._current_hotkey = kb.add_hotkey(
+                    hk, lambda: self.after(0, self.select_region))
+            except Exception as e:
+                self.after(0, lambda: self.status.set(f"⚠️ 熱鍵註冊失敗 {hk}: {e}"))
+        chk = self.cfg.get("clip_hotkey", "ctrl+alt+t").strip().lower()
+        if chk:
+            try:
+                self._current_clip_hotkey = kb.add_hotkey(
+                    chk, lambda: self.after(0, self.toggle_tx))
+            except Exception as e:
+                self.after(0, lambda: self.status.set(f"⚠️ 剪貼簿熱鍵註冊失敗 {chk}: {e}"))
 
     def _refresh_hotkey_labels(self):
         """熱鍵變更後同步更新 UI 文字"""
@@ -1684,6 +1745,9 @@ class MainApp(tk.Tk):
         if self._current_hotkey is not None:
             try: kb.remove_hotkey(self._current_hotkey)
             except Exception: pass
+        if self._current_clip_hotkey is not None:
+            try: kb.remove_hotkey(self._current_clip_hotkey)
+            except Exception: pass
         self.after(0, self.destroy)
 
     # ── 關閉按鈕 ─────────────────────────────────────────────
@@ -1713,4 +1777,8 @@ class MainApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    MainApp().mainloop()
+    start_minimized = "--minimized" in sys.argv
+    app = MainApp()
+    if start_minimized:
+        app.after(100, app.withdraw)
+    app.mainloop()
