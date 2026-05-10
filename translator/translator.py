@@ -881,6 +881,7 @@ class SentenceDialog(tk.Toplevel):
         surf, hira = self._tokens[idx]
         self.word_var.set(surf)
         self._sel_reading = hira if hira != surf else ""
+        self.reading_var.set(self._sel_reading)
         self.lookup_btn.configure(state="normal")
 
     def _lookup_word(self):
