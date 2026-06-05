@@ -2,7 +2,7 @@
 
 Windows 翻譯工具，**OCR 截圖 + AI 翻譯 + Anki 單字卡匯出**。專為閱讀日文／韓文漫畫與視覺小說（VN）的台灣繁中讀者/玩家所設計。
 
-[![Latest Release](https://img.shields.io/github/v/release/brokenblack/manga-TCNtranslator?label=最新版本)](https://github.com/brokenblack/manga-TCNtranslator/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/brokenblack/manga-ZHTWTranslator?label=最新版本)](https://github.com/brokenblack/manga-TCNtranslator/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ---
