@@ -10,20 +10,16 @@
 
 | 檔案 | 大小 | 啟動 | 說明 |
 |---|---|---|---|
-| [`翻譯工具_v1.1.0.zip`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.1.0/翻譯工具_v1.1.0.zip) ⭐ | 約 400 MB | < 2 秒 | Windows 內建解壓即可使用 |
-| [`翻譯工具_v1.1.0.7z`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.1.0/翻譯工具_v1.1.0.7z) | 約 280 MB | < 2 秒 | 需安裝 [7-Zip](https://www.7-zip.org/) |
-
-> 兩個檔案內容完全相同，依你習慣的解壓工具擇一下載。
+| [`翻譯工具.exe`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.1.0/翻譯工具.exe) ⭐ | 402 MB | 10-15 秒 | 單檔，下載即用，無需解壓或安裝 Python |
 
 ## 快速開始
 
-1. 下載 ZIP 並解壓到固定資料夾（建議桌面或 `C:\Tools`）
-2. 進入解壓後的 `翻譯工具/` 資料夾
-3. 雙擊 `翻譯工具.exe`
-4. 點右上角「⚙️ 翻譯設定」→「翻譯 API」分頁
-5. 填入 API Key → 儲存
+1. 下載 `翻譯工具.exe`，放到固定資料夾（建議桌面或 `C:\Tools`）
+2. 雙擊 `翻譯工具.exe`（首次啟動需 10-15 秒解壓，請耐心等候）
+3. 點右上角「⚙️ 翻譯設定」→「翻譯 API」分頁
+4. 填入 API Key → 儲存
 
-詳細使用方式請見資料夾內的 `使用說明.txt`。
+> 程式會在 exe 同層目錄生成 `config.json`（設定）與 `history.json`（翻譯紀錄），建議放固定資料夾。
 
 ## 全域快捷鍵
 
