@@ -1267,6 +1267,7 @@ class MainApp(tk.Tk):
 
         self._current_hotkey = None
         self._current_clip_hotkey = None
+        self._current_show_hotkey = None
         self._esc_hotkey = None
         self._tray_icon = None
         self._quitting = False
@@ -1884,6 +1885,15 @@ class MainApp(tk.Tk):
                     chk, lambda: self.after(0, self.toggle_tx))
             except Exception as e:
                 self.after(0, lambda: self.status.set(f"⚠️ 剪貼簿熱鍵註冊失敗 {chk}: {e}"))
+        if self._current_show_hotkey is not None:
+            try: kb.remove_hotkey(self._current_show_hotkey)
+            except Exception: pass
+            self._current_show_hotkey = None
+        try:
+            self._current_show_hotkey = kb.add_hotkey(
+                "ctrl+alt+w", lambda: self.after(0, self._tray_show))
+        except Exception as e:
+            self.after(0, lambda: self.status.set(f"⚠️ 顯示視窗熱鍵註冊失敗: {e}"))
 
     def _refresh_hotkey_labels(self):
         """熱鍵變更後同步更新 UI 文字"""
@@ -1930,6 +1940,9 @@ class MainApp(tk.Tk):
             except Exception: pass
         if self._current_clip_hotkey is not None:
             try: kb.remove_hotkey(self._current_clip_hotkey)
+            except Exception: pass
+        if self._current_show_hotkey is not None:
+            try: kb.remove_hotkey(self._current_show_hotkey)
             except Exception: pass
         if self._esc_hotkey is not None:
             try: kb.remove_hotkey(self._esc_hotkey)
