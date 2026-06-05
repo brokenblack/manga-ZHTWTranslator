@@ -9,8 +9,6 @@
 | [`翻譯工具.exe`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.0.1/翻譯工具.exe) | 402 MB | **新版** — 單一 exe，下載即用，分享方便 |
 | [`使用說明.txt`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.0.1/使用說明.txt) | 10 KB | 給使用者的操作說明 |
 
-> 仍想用資料夾版（啟動較快）？請到 [v1.0 release](https://github.com/brokenblack/manga-TCNtranslator/releases/tag/v1.0) 下載 ZIP / 7z。
-> 注意：v1.0 的 ZIP/7z 不含本版的 SentenceDialog 修復，需要修復請使用本版單檔 exe 或從原始碼重建。
 
 ## 修復
 
@@ -29,7 +27,6 @@
 | 場景 | 建議 |
 |---|---|
 | 想分享給朋友、不在乎啟動慢 | 本版 `翻譯工具.exe` |
-| 自己用、要啟動快 | [v1.0 ZIP / 7z](https://github.com/brokenblack/manga-TCNtranslator/releases/tag/v1.0)（資料夾版） |
 | 想自行打包 | 看 [README 開發者區塊](https://github.com/brokenblack/manga-TCNtranslator#從原始碼執行開發者) |
 
 ## 安全性
