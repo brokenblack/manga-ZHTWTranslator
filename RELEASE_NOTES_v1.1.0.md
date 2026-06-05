@@ -11,6 +11,7 @@
 | 檔案 | 大小 | 啟動 | 說明 |
 |---|---|---|---|
 | [`翻譯工具.exe`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.1.0/翻譯工具.exe) ⭐ | 402 MB | 10-15 秒 | 單檔，下載即用，無需解壓或安裝 Python |
+| [`使用說明.txt`](https://github.com/brokenblack/manga-TCNtranslator/releases/download/v1.1.0/使用說明.txt) | 10 KB | — | 完整操作說明與常見問題（選用下載） |
 
 ## 快速開始
 
@@ -20,6 +21,7 @@
 4. 填入 API Key → 儲存
 
 > 程式會在 exe 同層目錄生成 `config.json`（設定）與 `history.json`（翻譯紀錄），建議放固定資料夾。
+> 完整操作說明與常見問題請見一併提供的 `使用說明.txt`。
 
 ## 全域快捷鍵
 
